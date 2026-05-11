@@ -58,6 +58,9 @@ def _iter_top_level_lines(lines):
 
     Fence-marker lines themselves are never yielded (container markers, not
     content). Unclosed (orphan) fence behaves CommonMark-style: runs to EOF.
+    Callers that need to detect this state for security purposes (an attacker
+    embedding an unclosed fence to make subsequent `## ` headers invisible to
+    the parser) should use `_has_unclosed_fence` instead.
     """
     fence_open = None  # (char, length, has_info) when inside a fence, else None
     for i, line in enumerate(lines):
@@ -72,6 +75,27 @@ def _iter_top_level_lines(lines):
             continue
         if fence_open is None:
             yield i, line
+
+
+def _has_unclosed_fence(text):
+    """Return True if `text` contains a markdown code fence opener with no
+    matching closer (runs to EOF). Used to detect attacker-injected unclosed
+    fences in HANDOFF.md: an unclosed fence makes everything after it invisible
+    to `_iter_top_level_lines`, so subsequent `## Device` headers don't count
+    as boundaries and `extract_section_body` merges the hidden content into
+    the previous section's body."""
+    fence_open = None
+    for line in text.split("\n"):
+        marker = _fence_marker(line)
+        if marker is None:
+            continue
+        if fence_open is None:
+            fence_open = marker
+        elif (marker[0] == fence_open[0]
+              and marker[1] >= fence_open[1]
+              and not marker[2]):
+            fence_open = None
+    return fence_open is not None
 
 
 def _iter_top_level_header_names(text):
@@ -234,6 +258,20 @@ def _get_boundary_headers(text):
     or registers it. Leakage into a Claude session is not — by the time the
     injection runs the trust boundary is already crossed.
     """
+    if _has_unclosed_fence(text):
+        # Unclosed fence detected: `_iter_top_level_lines` treats everything
+        # after the open fence as inside-fence and hides those lines from
+        # boundary detection. An attacker editing HANDOFF.md can drop a stray
+        # ``` after a victim section header to make subsequent `## Device`
+        # boundaries invisible — content merges across sections. Surface this
+        # state loudly; the caller (sync.sh banners, preflight hook) sees
+        # stderr and can flag it to the user.
+        print(
+            "warning: HANDOFF.md contains an unclosed code fence — boundary "
+            "detection may merge adjacent sections. Open HANDOFF.md and close "
+            "the dangling fence before trusting /sync's task list.",
+            file=sys.stderr,
+        )
     registry = read_registry(text)
     # Use the RAW boundary header set, not the validator-filtered one.
     # `_extract_all_headers` drops names that fail `_validate_section_name`

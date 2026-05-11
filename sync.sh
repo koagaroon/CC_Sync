@@ -826,7 +826,10 @@ fi
 # 注意: HAS_ERROR 赋值仅在主进程中生效，子进程中请用 touch .error 文件
 sync_commit_push() {
     local label="$1"
-    git add -A -- ':!**/*.bak'
+    # `:!**/*.bak` pathspec only matches paths that contain a directory separator;
+    # without the second pathspec `:!*.bak`, top-level files like `settings.json.bak`
+    # / `.env.bak` / `secrets.bak` slip past and get auto-committed-and-pushed.
+    git add -A -- ':!**/*.bak' ':!*.bak'
     if ! git commit -m "sync: auto commit from $(hostname)"; then
         echo -e "${RED}${label} commit 失败${NC}" >&2
         HAS_ERROR=1
@@ -1135,9 +1138,13 @@ for m in re.findall(r'\[modules\.([^\]]+)\]', text):
     # 导致前导 \n 的中间脏态（虽然后续 sed '/^$/d' 会清掉，但避免依赖副作用）
     local -a CUSTOM_NAMES=()
 
-    # 本地侧：~/.claude/skills/ 中不在 modules.toml 里的目录
+    # 拒绝 symlink 目录：legit skill 目录都是普通目录；dotfiles 仓库里如果
+    # 有 `claude/skills/loot -> /home/user/.ssh` 这种 symlink，glob `*/` + `[-d]`
+    # 都会接受它，后续 cd+find 会跟着 symlink 把本机敏感目录的文件列出来并
+    # 镜像进 ~/.claude/skills/loot。`[ ! -L "$d" ]` 在 `[ -d ]` 之前显式过滤。
     if [ -d "$LOCAL_SKILLS" ]; then
         for d in "$LOCAL_SKILLS"/*/; do
+            [ -L "${d%/}" ] && continue
             [ ! -d "$d" ] && continue
             local name
             name=$(basename "$d")
@@ -1147,9 +1154,11 @@ for m in re.findall(r'\[modules\.([^\]]+)\]', text):
         done
     fi
 
-    # dotfiles 侧：dotfiles/claude/skills/ 中的目录（排除 modules.toml 管理的）
+    # dotfiles 侧：同样拒绝 symlink 目录（更高威胁——dotfiles 可能从 remote pull
+    # 进来带 symlink 的攻击 payload）
     if [ -d "$DOTFILES_SKILLS" ]; then
         for d in "$DOTFILES_SKILLS"/*/; do
+            [ -L "${d%/}" ] && continue
             [ ! -d "$d" ] && continue
             local name
             name=$(basename "$d")
@@ -1184,14 +1193,17 @@ for m in re.findall(r'\[modules\.([^\]]+)\]', text):
         echo "  ${skill_name}/:"
 
         # 合并两侧文件列表（排除 __pycache__、.pyc）
+        # find -P：不跟随 symlink。即使顶层 skill 目录已经通过 [-L] 拒绝过，
+        # 子层级仍可能藏 symlink（攻击者塞 `dotfiles/claude/skills/foo/loot -> ~/.ssh`）
+        # 这样后续 sync_config_file 会按 symlink 目标的内容做双向复制。
         local ALL_FILES=""
-        if [ -d "$dotfiles_skill" ]; then
-            ALL_FILES=$(cd "$dotfiles_skill" && find . -type f \
+        if [ -d "$dotfiles_skill" ] && [ ! -L "$dotfiles_skill" ]; then
+            ALL_FILES=$(cd "$dotfiles_skill" && find -P . -type f \
                 ! -path '*/__pycache__/*' ! -name '*.pyc' | sed 's|^\./||')
         fi
-        if [ -d "$local_skill" ]; then
+        if [ -d "$local_skill" ] && [ ! -L "$local_skill" ]; then
             local LOCAL_FILES
-            LOCAL_FILES=$(cd "$local_skill" && find . -type f \
+            LOCAL_FILES=$(cd "$local_skill" && find -P . -type f \
                 ! -path '*/__pycache__/*' ! -name '*.pyc' | sed 's|^\./||')
             ALL_FILES=$(printf '%s\n%s' "$ALL_FILES" "$LOCAL_FILES")
         fi
