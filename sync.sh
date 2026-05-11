@@ -791,12 +791,15 @@ for repo in data:
     # 孤儿目录检测：有远端仓库列表时才做（没有的话没对比基准）
     if [ -n "$REPOS" ]; then
         ORPHAN_FOUND=0
-        # Treat .sync_ignore entries as known so the orphan loop doesn't
-        # re-flag intentionally-excluded repos. Without this, .sync_ignore
-        # only filters topic discovery — the orphan check below would still
-        # warn on every sync.
+        # Build a SEPARATE set for orphan suppression. Do NOT merge
+        # .sync_ignore into KNOWN_REPOS — that set is also iterated by step 2's
+        # memory sync (sync_memory_dir), so adding ignored repos there would
+        # copy their Claude project memory into dotfiles and push to the
+        # remote, defeating the purpose of .sync_ignore for any repo whose
+        # CC project hash exists locally.
+        declare -A IGNORED_SET
         while IFS= read -r ignored_name; do
-            [ -n "$ignored_name" ] && KNOWN_REPOS["$ignored_name"]=1
+            [ -n "$ignored_name" ] && IGNORED_SET["$ignored_name"]=1
         done <<< "$IGNORED_LIST"
         # GitHub repo names are constrained to [A-Za-z0-9._-]. Local dirs that
         # don't match that regex CAN'T have a corresponding GitHub repo via
@@ -814,6 +817,7 @@ for repo in data:
                 DIR_NAME=$(basename "$DIR")
                 [[ "$DIR_NAME" == .* ]] && continue
                 [ "${KNOWN_REPOS[$DIR_NAME]+_}" ] && continue
+                [ "${IGNORED_SET[$DIR_NAME]+_}" ] && continue
 
                 if [ $ORPHAN_FOUND -eq 0 ]; then
                     echo ""
