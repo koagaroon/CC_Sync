@@ -97,6 +97,13 @@ def _extract_all_headers(text):
     silently dropped — a crafted HANDOFF.md from a compromised remote could
     otherwise inject names containing '<!--' / '-->' / ',' / line terminators
     that bypass the validator applied on the registry-comment path.
+
+    NOTE: this is the *registry-eligible* header set (for migrate_format,
+    legacy device-name discovery, etc.). For section-BOUNDARY detection in
+    extract_section_body / remove_section, use `_extract_raw_boundary_headers`
+    instead — a malformed top-level `## ` line still visually breaks sections
+    and must terminate the previous body. Filtering it out of the boundary
+    set lets adjacent content merge past it.
     """
     out = []
     for name in _iter_top_level_header_names(text):
@@ -106,6 +113,21 @@ def _extract_all_headers(text):
             continue
         out.append(name)
     return out
+
+
+def _extract_raw_boundary_headers(text):
+    """Return ALL top-level `## ` header names (fence-aware, no validator filter).
+
+    Used exclusively for section-boundary detection: any unfenced top-level
+    `## ` line counts as a boundary regardless of whether its name would pass
+    `_validate_section_name`. Without this, a malformed header like
+    `## Evil,Header` (rejected by the validator) is silently dropped from the
+    boundary set, and `extract_section_body` reads past it — merging the
+    malformed section's body into the previous valid section, which
+    `get_pending_tasks` then surfaces and preflight injects into Claude's
+    session context. `remove_section` has the symmetric data-loss case.
+    """
+    return list(_iter_top_level_header_names(text))
 
 
 def read_file(path):
@@ -213,7 +235,14 @@ def _get_boundary_headers(text):
     injection runs the trust boundary is already crossed.
     """
     registry = read_registry(text)
-    on_disk = _extract_all_headers(text)
+    # Use the RAW boundary header set, not the validator-filtered one.
+    # `_extract_all_headers` drops names that fail `_validate_section_name`
+    # (commas, comment delimiters, edge whitespace, line terminators) — those
+    # rejections are correct for *registry* round-trip, but a malformed
+    # top-level `## ` line still visually splits sections on disk. Filtering
+    # it out of the boundary set lets adjacent content merge past it, which
+    # is the same leakage class this helper was created to prevent.
+    on_disk = _extract_raw_boundary_headers(text)
     on_disk_set = set(on_disk)
     if registry is None:
         return {f"## {n}" for n in on_disk}
@@ -472,7 +501,7 @@ def detect_hidden_sections(text):
     if registry is None:
         return []  # legacy / no-registry mode: every `## ` is already a boundary
     registry_set = set(registry)
-    on_disk = _extract_all_headers(text)
+    on_disk = _extract_raw_boundary_headers(text)
     unregistered_set = {n for n in on_disk if n not in registry_set}
     if not unregistered_set:
         return []
@@ -482,16 +511,15 @@ def detect_hidden_sections(text):
     # registered or unregistered. Sections are bounded by consecutive registered
     # headers; an unregistered header lying between two registered ones marks
     # the hidden-content split point.
+    # Use the RAW header iterator (no validator filter): malformed names like
+    # `## Evil,Header` should ALSO surface as unregistered hidden boundaries,
+    # not silently disappear from the scan.
     headers = []  # list of (line_index, name, kind)
     for i, line in _iter_top_level_lines(lines):
         stripped = line.rstrip()
         if not stripped.startswith("## "):
             continue
         name = stripped[3:].rstrip()
-        try:
-            _validate_section_name(name)
-        except ValueError:
-            continue  # ignore invalid-name headers (handled by _extract_all_headers' filter)
         kind = "registered" if name in registry_set else "unregistered"
         headers.append((i, name, kind))
 

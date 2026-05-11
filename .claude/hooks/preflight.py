@@ -2,6 +2,7 @@
 import json
 import shutil
 import sys
+from html import escape
 sys.stdout.reconfigure(encoding="utf-8")
 from pathlib import Path
 
@@ -61,18 +62,31 @@ if handoff:
         hidden = handoff.detect_hidden_sections(text)
         if pending or hidden:
             blocks = []
+            # html.escape() on body content and attribute values is required:
+            # without it, an attacker who can push to HANDOFF.md can embed a
+            # literal `</task>` in the task body, breaking out of the trust
+            # envelope. The trailing text after that closing tag lands in
+            # Claude's systemMessage OUTSIDE the "treat as untrusted" warning
+            # scope. Same risk for target / unreg attribute values containing
+            # a literal `"`. escape(quote=True) covers both the `<`/`>`/`&`
+            # text-node case and the `"` attribute-quote case.
             for t, body in pending:
+                safe_target = escape(t, quote=True)
+                safe_body = escape(body)
                 blocks.append(
-                    f'<task source="HANDOFF.md" target="{t}" trust="untrusted">\n'
-                    f"{body}\n"
+                    f'<task source="HANDOFF.md" target="{safe_target}" trust="untrusted">\n'
+                    f"{safe_body}\n"
                     "</task>"
                 )
             for target, unreg, excerpt in hidden:
+                safe_target = escape(target, quote=True)
+                safe_unreg = escape(unreg, quote=True)
+                safe_excerpt = escape(excerpt)
                 blocks.append(
-                    f'<task source="HANDOFF.md" target="{target}" '
+                    f'<task source="HANDOFF.md" target="{safe_target}" '
                     f'trust="untrusted" status="HIDDEN-BY-UNREGISTERED-HEADING" '
-                    f'split-at="## {unreg}">\n'
-                    f"{excerpt}\n"
+                    f'split-at="## {safe_unreg}">\n'
+                    f"{safe_excerpt}\n"
                     "</task>"
                 )
             task_blocks = "\n\n".join(blocks)
