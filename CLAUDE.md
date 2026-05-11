@@ -35,12 +35,14 @@ When `.env` does not exist:
 - **Interactive terminal**: The first-run wizard launches automatically. It prompts for the dotfiles repo path, whether to enable repo sync, and workspace root directories.
 - **Non-interactive** (Claude Code Bash tool): The wizard needs a TTY for its prompts, so sync.sh exits with an error. Run `bash sync.sh` once in an interactive terminal (e.g. Git Bash, PowerShell) to create `.env`; afterward `/sync` works normally from Claude Code.
 
-Example `.env` (created by wizard):
+Example `.env` (created by wizard — values are single-quoted via Python `shlex.quote`):
 ```
-DOTFILES_PATH=/c/Claude_code_cli/dotfiles
-ENABLE_REPO_SYNC=true
-WORKSPACE_ROOTS=/c/Claude_code_cli
+DOTFILES_PATH='/c/Claude_code_cli/dotfiles'
+ENABLE_REPO_SYNC='true'
+WORKSPACE_ROOTS='/c/Claude_code_cli'
 ```
+
+The wizard always writes single-quoted form. Older unquoted/double-quoted `.env` files are auto-migrated to this canonical form on every sync run by `_migrate_legacy_env` (with stderr warnings if the old value contained `$` / backtick / multi-token whitespace).
 
 ## Commands
 
@@ -64,9 +66,10 @@ bash module-manager.sh list          # List tracked modules
 
 ### .env File Safety
 
-- Unquoted values containing semicolons (e.g. `E:/Work;F:/Personal`) are split by `source` into separate commands — write values double-quoted: `KEY="value"`.
+- `sync.sh` loads `.env` via `source`, so any value the shell can interpret runs as code. **Single-quote** all values (`KEY='value'`) — single quotes inhibit `$`, backtick, `\`, and `!` expansion entirely. Double quotes (`KEY="value"`) are NOT safe: a value like `KEY="$(touch PWNED)"` is command-substituted at source-time. Embedded single quotes use the shell idiom `'\''` (close, escape, reopen).
+- Always emit values via `shlex.quote()` — never hand-build the quoted form. The wizard, `_append_workspace_root`, and `_migrate_legacy_env` all do this.
 - Unconditionally appending a key after a replacement loop creates duplicate entries — use in-loop elif replacement with a found-flag append instead.
-- Older `.env` files may store values without quotes; strip quotes from old values when reading (`.strip('"')`) so both legacy and new formats parse correctly.
+- Older `.env` files (unquoted or double-quoted) are auto-rewritten to single-quoted form by `_migrate_legacy_env` on every run; warnings fire when a value originally contained `$` or backtick (previously expanded, now literal) or multiple whitespace-separated tokens (kept as-is, requires manual quoting).
 
 ### Python File I/O
 
@@ -100,14 +103,24 @@ New return codes must be added to both the function and the caller dispatch.
 
 ## Verification
 
+`bash sync.sh` is **not** a verification command — when `.env` exists it
+performs a real sync (commits + pushes the dotfiles repo, commits +
+pushes every project repo). Do not invoke it just to "check things still
+work." Use these read-only / side-effect-free checks instead:
+
 ```bash
-bash -n sync.sh              # Syntax check
-bash sync.sh                 # Full run
+bash -n sync.sh                # Syntax check (parses, does not execute)
+shellcheck sync.sh             # Static analysis (if installed)
+bash sync.sh device list       # Read-only: prints registered devices
+bash module-manager.sh list    # Read-only: prints tracked modules
 ```
+
+Only run a real `bash sync.sh` when the user has explicitly asked to
+sync.
 
 ## Pitfalls to Avoid
 
-- `source`-ing a `.env` with unquoted values containing semicolons or spaces splits them into separate commands.
+- `source`-ing a `.env` with unquoted (or double-quoted) values is unsafe — see `.env File Safety` above. Always single-quote, always via `shlex.quote()`.
 - Under `set -e`, `((var++))` evaluates to falsy when `var` is 0 and exits the script — use `var=$((var + 1))`.
 - Function definitions inside conditional blocks disappear when the branch is skipped (see Functions and Scope above).
 - Writing files without `newline="\n"` on Windows produces CRLF and git phantom diffs.

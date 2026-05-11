@@ -312,16 +312,26 @@ def cmd_manifest_write():
 
 
 def cmd_tab_vars():
-    """Output module fields as tab-separated values in fixed order.
+    """Output module fields separated by ASCII US (\\x1f, Unit Separator) in fixed order.
     Reads JSON from stdin (piped from bash via: echo "$json" | py_helper tab-vars).
-    Fields: name, kind, repo, path, ref, install_path, latest_sha"""
+    Fields: name, kind, repo, path, ref, install_path, latest_sha
+
+    The delimiter is \\x1f (Unit Separator), not \\t. Bash treats whitespace
+    delimiters specially in `IFS`: runs of whitespace collapse into a single
+    separator and empty fields between them are dropped. With \\t, a record
+    like `name\\tgithub-repo\\towner/repo\\t\\tmain\\tname\\tsha` (path field
+    intentionally empty for github-repo modules) re-binds to
+    path=main, ref=name, install_path=sha — silently corrupting updates.
+    \\x1f is non-whitespace, so consecutive delimiters preserve empty fields.
+    The dispatch key stays `tab-vars` for backwards compatibility with any
+    out-of-tree caller, but the on-wire format is US-separated."""
     try:
         obj = json.loads(sys.stdin.readline())
     except json.JSONDecodeError as e:
         print(f"错误：tab-vars 输入 JSON 解析失败 ({e})", file=sys.stderr)
         sys.exit(1)
     fields = ["name", "kind", "repo", "path", "ref", "install_path", "latest_sha"]
-    print("\t".join(str(obj.get(f, "")) for f in fields))
+    print("\x1f".join(str(obj.get(f, "")) for f in fields))
 
 
 def cmd_module_exists():
@@ -601,11 +611,19 @@ def cmd_manifest_delete_module():
 def cmd_list_untracked():
     """Print untracked directories in skills_dir, one per line.
     Args: argv[2] = manifest JSON string; argv[3] = skills_dir path.
-    Output is the parsing contract for module-manager.sh's `prune` command."""
+    Output is the parsing contract for module-manager.sh's `prune` command.
+    Names containing CR/LF are skipped: the bash consumer reads with
+    `while IFS= read -r name`, which splits on \\n. A directory named
+    e.g. `tracked-name\\nunrelated` would split into two candidates and
+    the second could escape the tracked-paths check. Such names cannot
+    round-trip through line-oriented IPC anyway."""
     data = json.loads(sys.argv[2])
     modules = data.get("modules", {})
     skills_dir = sys.argv[3]
     for d in _list_unmanaged(modules, skills_dir):
+        if "\n" in d or "\r" in d:
+            print(f"warning: skipping unmanaged dir with CR/LF in name: {d!r}", file=sys.stderr)
+            continue
         print(d)
 
 

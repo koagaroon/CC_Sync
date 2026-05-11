@@ -838,7 +838,10 @@ _files_equivalent() {
     local A_PY B_PY
     A_PY=$(normalize_path "$A")
     B_PY=$(normalize_path "$B")
-    python -c "
+    # -I (isolated mode): drops CWD from sys.path so an attacker-placed
+    # re.py / sys.py in the dotfiles repo (CWD here is $DOTFILES_DIR via
+    # the pushd in step 2) cannot shadow stdlib imports.
+    python -I -c "
 import sys, re
 def load(p):
     with open(p, 'r', encoding='utf-8') as f:
@@ -1595,20 +1598,22 @@ _process_repo() {
             # Format consumed by SKILL.md → UNTRACKED AskUserQuestion flow
             # Do not change field names or delimiters without updating SKILL.md
             #
-            # 安全检查：若有文件名内含 marker 字符串（=== ... ===），输出会被攻击者
-            # 控制的文件名截断或注入伪造块。检测到就退化为安全模式：保留所有文件
-            # 不变（既不 stage 也不 emit FILES），等用户手动处理
+            # 安全检查：若有文件名内含 marker 字符串或换行/回车，输出会被攻击者
+            # 控制的文件名截断或注入伪造块。'===' 是块分隔符；CR/LF 让单个文件名
+            # 跨多行物理输出，可注入伪造 marker 行（如 NEW_REPO:、REPO:、FILES:）
+            # 即使文件名本身不含 '==='。检测到就退化为安全模式：保留所有文件不变
+            # （既不 stage 也不 emit FILES），等用户手动处理
             local _has_marker_collision=0
             for _f in "${UNTRACKED_LIST[@]}"; do
-                if [[ "$_f" == *'==='* ]]; then
+                if [[ "$_f" == *'==='* ]] || [[ "$_f" == *$'\n'* ]] || [[ "$_f" == *$'\r'* ]]; then
                     _has_marker_collision=1
                     break
                 fi
             done
             if [ "$_has_marker_collision" = 1 ]; then
-                echo "${REPO_NAME}|未跟踪文件含可疑名（'===' 字符串），需手动处理" > "${SYNC_TMPDIR}/${REPO_NAME}.result"
+                echo "${REPO_NAME}|未跟踪文件含可疑名（'===' 字串或 CR/LF），需手动处理" > "${SYNC_TMPDIR}/${REPO_NAME}.result"
                 echo "----- ${REPO_NAME} 安全跳过 -----"
-                echo "检测到未跟踪文件名含 '===' 序列，可能干扰 marker 解析。请手动处理后重试。"
+                echo "检测到未跟踪文件名含 '===' 序列或换行/回车字符，可能干扰 marker 解析。请手动处理后重试。"
                 touch "${SYNC_TMPDIR}/${REPO_NAME}.error"
                 echo ""
                 return

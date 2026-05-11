@@ -197,24 +197,32 @@ def section_exists(text, name):
 
 
 def extract_section_body(text, name):
-    """Extract the body content of a named section, fence-aware.
+    """Extract the body content of a named section, fence-aware and registry-bounded.
 
     Walks lines through `_iter_top_level_lines` (skips fenced code blocks) instead
     of running a `MULTILINE` regex against the raw text — otherwise a `## DeviceName`
     line buried in a task body's code fence would prematurely terminate the body
-    extraction. Returns None if no top-level header matches `name`.
+    extraction. Section boundaries are limited to **registered device names**
+    (registry comment, plus implicit ANY; or all top-level validated headers in
+    legacy/no-registry mode): a task body containing an unregistered heading like
+    `## Notes` or `## Safety` does NOT end the section. Without this constraint,
+    a collaborator who can edit HANDOFF.md can hide tasks from the receiver by
+    inserting an unregistered `## ` line — everything after it would be silently
+    dropped from `get_pending_tasks` and the preflight banner. Returns None if no
+    top-level header matches `name`.
     """
     lines = text.split("\n")
     target_header = f"## {name}"
     target_index = None
     next_boundary = None
+    boundary_headers = {f"## {n}" for n in _get_device_names(text)}
     for i, line in _iter_top_level_lines(lines):
         stripped = line.rstrip()
         if target_index is None:
             if stripped == target_header:
                 target_index = i
         else:
-            if stripped.startswith("## "):
+            if stripped in boundary_headers:
                 next_boundary = i
                 break
     if target_index is None:
@@ -298,16 +306,20 @@ def remove_section(text, name):
 
     Uses line-by-line scanning + code-fence tracking to avoid matching a literal
     ## Name line that appears inside a code fenced block (which would corrupt
-    unrelated content).
+    unrelated content). Section boundaries are limited to **registered device
+    names** (matching `extract_section_body`'s rule); without this, an unregistered
+    `## ` heading inside the target's body would shorten the deletion span and
+    leave orphaned task content stranded after the removal.
     """
     lines = text.split("\n")
-    # Collect device-section-header indices (non-fenced `## <Name>` lines)
+    boundary_headers = {f"## {n}" for n in _get_device_names(text)}
+    # Collect device-section-header indices (non-fenced, registered-name `## <Name>` lines)
     boundary_indices = []
     target_index = None
     target_header = f"## {name}"
     for i, line in _iter_top_level_lines(lines):
         stripped = line.rstrip()
-        if stripped.startswith("## "):
+        if stripped in boundary_headers:
             boundary_indices.append(i)
             if stripped == target_header and target_index is None:
                 target_index = i

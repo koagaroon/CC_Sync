@@ -264,7 +264,11 @@ cmd_update() {
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local name kind repo path ref install_path latest_sha
-        IFS=$'\t' read -r name kind repo path ref install_path latest_sha <<< "$(echo "$line" | py_helper tab-vars)"
+        # py_helper tab-vars emits US (\x1f), not \t — \t is IFS whitespace
+        # in bash so empty fields collapse, mis-binding path/ref/install_path
+        # for github-repo modules where `path` is intentionally empty. \x1f
+        # is non-whitespace, so consecutive delimiters yield empty fields.
+        IFS=$'\x1f' read -r name kind repo path ref install_path latest_sha <<< "$(echo "$line" | py_helper tab-vars)"
 
         # Validate install_path from manifest (prevent path traversal)
         if ! _validate_module_name "$install_path" 2>/dev/null; then
@@ -637,7 +641,11 @@ cmd_restore() {
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local name kind repo path ref install_path latest_sha
-        IFS=$'\t' read -r name kind repo path ref install_path latest_sha <<< "$(echo "$line" | py_helper tab-vars)"
+        # py_helper tab-vars emits US (\x1f), not \t — \t is IFS whitespace
+        # in bash so empty fields collapse, mis-binding path/ref/install_path
+        # for github-repo modules where `path` is intentionally empty. \x1f
+        # is non-whitespace, so consecutive delimiters yield empty fields.
+        IFS=$'\x1f' read -r name kind repo path ref install_path latest_sha <<< "$(echo "$line" | py_helper tab-vars)"
 
         # Validate install_path from manifest (prevent path traversal)
         if ! _validate_module_name "$install_path" 2>/dev/null; then
@@ -723,6 +731,15 @@ cmd_prune() {
             [[ -z "$name" ]] && continue
             if ! _validate_module_name "$name" 2>/dev/null; then
                 echo -e "  ${RED}✗${NC} ${name}: 名称非法，跳过"
+                errors=$((errors + 1))
+                continue
+            fi
+            # 防御深度：list-untracked 已按 tracked_paths 过滤，但若任何环节
+            # （Python helper 输出格式漂移、CR/LF 拆分、JSON 编码异常）让一个
+            # tracked 名字误入此循环，下面的 rm -rf 会删掉受管模块。在删之前
+            # 再问一次 manifest，碰到 tracked 名字直接拒绝。
+            if [[ "$(module_exists "$data" "$name")" == "yes" ]]; then
+                echo -e "  ${RED}✗${NC} ${name}: 仍在 manifest 中——拒绝删除（请用 remove）"
                 errors=$((errors + 1))
                 continue
             fi
