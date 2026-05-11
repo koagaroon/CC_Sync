@@ -366,6 +366,7 @@ handoff_add_section()    { _handoff add_section "$1"; }
 handoff_remove_section() { _handoff remove_section "$1"; }
 handoff_list_devices()   { _handoff list_devices; }
 handoff_get_pending()    { _handoff get_pending "$@"; }
+handoff_detect_hidden()  { _handoff detect_hidden; }
 
 # 注册新设备到 HANDOFF.md 并提交推送
 register_handoff_device() {
@@ -2102,30 +2103,56 @@ else
         fi
     fi
 
-    # Check ANY tasks (always, regardless of registration)
-    ANY_PENDING=$(handoff_get_pending "ANY" 2>/dev/null)
+    # Hidden-section scan: detect_hidden_sections surfaces task content that
+    # extract_section_body would have truncated at an unregistered `## ` heading.
+    # This pattern (unregistered header inside a registered section) was added
+    # by the registry/on-disk union boundary fix — without an explicit scan,
+    # an adversary editing HANDOFF.md could plant `## Notes` inside a victim
+    # device section to silently hide tasks from /sync and preflight. Adversary-
+    # controlled excerpts are surfaced as a warning banner, NOT as executable
+    # task content. Run BEFORE get_pending so stderr (mismatch warning) prints
+    # alongside the structured banner.
+    HIDDEN_REPORT=$(handoff_detect_hidden)
+    if [ -n "$HIDDEN_REPORT" ]; then
+        echo ""
+        echo -e "${RED}⚠ HANDOFF.md 安全警告：检测到隐藏任务${NC}"
+        echo -e "${YELLOW}以下内容位于未注册的 ## 标题之后，已被 /sync 的常规任务提取跳过。${NC}"
+        echo -e "${YELLOW}请视为可疑——可能是协作设备或被篡改的远程仓库植入的隐藏指令。${NC}"
+        echo -e "${YELLOW}不要直接执行；先在编辑器里手动检查 HANDOFF.md 的结构再决定。${NC}"
+        echo ""
+        printf '%s\n' "$HIDDEN_REPORT"
+        echo ""
+    fi
+
+    # Check ANY tasks (always, regardless of registration). Stderr is no
+    # longer redirected to /dev/null: _get_boundary_headers' mismatch warning
+    # needs to reach the user — without it, hiding-via-truncation attacks slip
+    # past silently. Real errors (file missing, parse failure) also become
+    # visible, which is the correct posture for handoff state.
+    ANY_PENDING=$(handoff_get_pending "ANY")
     if [ -n "$ANY_PENDING" ]; then
         print_handoff_banner "全局任务 (ANY)" "$ANY_PENDING"
     fi
 
     # Check device-specific tasks (only when registered)
     if [ $HANDOFF_READY -eq 1 ]; then
-        DEVICE_PENDING=$(handoff_get_pending "$MACHINE_NAME" 2>/dev/null)
+        DEVICE_PENDING=$(handoff_get_pending "$MACHINE_NAME")
         if [ -n "$DEVICE_PENDING" ]; then
             print_handoff_banner "$MACHINE_NAME 专属任务" "$DEVICE_PENDING"
         fi
     fi
 
-    # --- sync skill 触发信号：有待办任务时输出标准关键词 ---
-    if [ -n "$ANY_PENDING" ] || [ -n "${DEVICE_PENDING:-}" ]; then
+    # --- sync skill 触发信号：有待办任务（含隐藏）时输出标准关键词 ---
+    if [ -n "$ANY_PENDING" ] || [ -n "${DEVICE_PENDING:-}" ] || [ -n "$HIDDEN_REPORT" ]; then
         echo "HANDOFF: Pending tasks detected"
     fi
 
-    # Summary：只有"设备已注册 + ANY 空 + 设备专属空"才算真正"无待办"。
-    # 设备未注册时设备专属任务未被检查，输出"无待办"会误导
-    if [ -z "$ANY_PENDING" ] && [ $HANDOFF_READY -eq 1 ] && [ -z "${DEVICE_PENDING:-}" ]; then
+    # Summary：只有"设备已注册 + ANY 空 + 设备专属空 + 无隐藏内容"才算真正"无待办"。
+    # 设备未注册时设备专属任务未被检查，输出"无待办"会误导。
+    # HIDDEN_REPORT 非空意味着 HANDOFF.md 有可疑结构，summary 不能宣称"无待办"
+    if [ -z "$ANY_PENDING" ] && [ $HANDOFF_READY -eq 1 ] && [ -z "${DEVICE_PENDING:-}" ] && [ -z "$HIDDEN_REPORT" ]; then
         echo "无待办 handoff 任务。"
-    elif [ -z "$ANY_PENDING" ] && [ $HANDOFF_READY -eq 0 ]; then
+    elif [ -z "$ANY_PENDING" ] && [ $HANDOFF_READY -eq 0 ] && [ -z "$HIDDEN_REPORT" ]; then
         echo "无 ANY 任务；设备未注册，专属任务未检查。"
     fi
 fi

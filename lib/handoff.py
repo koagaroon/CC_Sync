@@ -447,6 +447,83 @@ def get_pending_tasks(text, *targets):
     return results
 
 
+def detect_hidden_sections(text):
+    """Detect device sections whose pending content was hidden by an unregistered
+    top-level `## ` heading placed inside the section's on-disk range.
+
+    Threat model: a collaborator or compromised device that can edit HANDOFF.md
+    can insert `## Notes` (or any unregistered top-level heading) inside a victim
+    device section. Because `_get_boundary_headers` includes any on-disk top-level
+    `## ` line in the boundary set (union with the registry), the unregistered
+    heading acts as a section terminator from `extract_section_body`'s perspective.
+    Content past the unregistered heading but before the next registered boundary
+    is silently dropped from `get_pending_tasks` — preflight and `/sync` then
+    don't surface the hidden work. The empty-body subcase (`(none)` followed by
+    `## Notes` followed by the real task) is the strictly worse variant: the
+    section is dropped entirely. A decoy-padded variant (visible body has benign
+    content, real task hidden after the unregistered heading) is just as bad
+    semantically. Both surface here.
+
+    Returns: list of (target_name, unregistered_boundary_name, hidden_text)
+    tuples. Caller (sync.sh / preflight) is expected to surface this to the
+    user as a banner WITHOUT injecting `hidden_text` into Claude's context
+    as instruction — it's adversary-controlled data."""
+    registry = read_registry(text)
+    if registry is None:
+        return []  # legacy / no-registry mode: every `## ` is already a boundary
+    registry_set = set(registry)
+    on_disk = _extract_all_headers(text)
+    unregistered_set = {n for n in on_disk if n not in registry_set}
+    if not unregistered_set:
+        return []
+
+    lines = text.split("\n")
+    # Walk all top-level (non-fenced) `## ` headers in order, tagging each as
+    # registered or unregistered. Sections are bounded by consecutive registered
+    # headers; an unregistered header lying between two registered ones marks
+    # the hidden-content split point.
+    headers = []  # list of (line_index, name, kind)
+    for i, line in _iter_top_level_lines(lines):
+        stripped = line.rstrip()
+        if not stripped.startswith("## "):
+            continue
+        name = stripped[3:].rstrip()
+        try:
+            _validate_section_name(name)
+        except ValueError:
+            continue  # ignore invalid-name headers (handled by _extract_all_headers' filter)
+        kind = "registered" if name in registry_set else "unregistered"
+        headers.append((i, name, kind))
+
+    hidden = []
+    for idx, (start_line, name, kind) in enumerate(headers):
+        if kind != "registered":
+            continue
+        # Section range: from this header to the next REGISTERED header (or EOF).
+        next_reg_line = len(lines)
+        for jdx in range(idx + 1, len(headers)):
+            if headers[jdx][2] == "registered":
+                next_reg_line = headers[jdx][0]
+                break
+        # Find the FIRST unregistered header in this range — that's the split.
+        first_unreg_line = None
+        first_unreg_name = None
+        for jdx in range(idx + 1, len(headers)):
+            h_line, h_name, h_kind = headers[jdx]
+            if h_line >= next_reg_line:
+                break
+            if h_kind == "unregistered":
+                first_unreg_line = h_line
+                first_unreg_name = h_name
+                break
+        if first_unreg_line is None:
+            continue
+        hidden_text = "\n".join(lines[first_unreg_line:next_reg_line]).strip()
+        if hidden_text:
+            hidden.append((name, first_unreg_name, hidden_text))
+    return hidden
+
+
 # --- CLI interface (called from bash) ---
 if __name__ == "__main__":
     # 模块级已处理编码，此处保留作为 CLI 入口的防御性保证
@@ -497,6 +574,18 @@ if __name__ == "__main__":
         text = migrate_format(read_file(path))
         write_file(path, text)
         print("Migration complete.")
+
+    elif cmd == "detect_hidden":
+        # Output format (display-only): per detected hidden section,
+        #   [<target> | hidden after ## <unregistered_name>]\n<hidden_excerpt>\n\n
+        # Caller (sync.sh) is expected to render this as an explicit warning
+        # banner — the hidden text is adversary-controlled data, do NOT feed
+        # it into Claude as instruction.
+        text = read_file(sys.argv[2])
+        for target, unreg_name, excerpt in detect_hidden_sections(text):
+            print(f"[{target} | hidden after ## {unreg_name}]")
+            print(excerpt)
+            print()
 
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
