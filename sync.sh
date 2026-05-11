@@ -791,6 +791,16 @@ for repo in data:
     # 孤儿目录检测：有远端仓库列表时才做（没有的话没对比基准）
     if [ -n "$REPOS" ]; then
         ORPHAN_FOUND=0
+        # GitHub repo names are constrained to [A-Za-z0-9._-]. Local dirs that
+        # don't match that regex CAN'T have a corresponding GitHub repo via
+        # the suggested command — and worse, embedding such names unquoted in
+        # an `echo -e` output is unsafe: ANSI escape sequences (`\e[...`) in
+        # the name would manipulate the terminal, and shell metacharacters
+        # (`;`, `$()`, backticks, newlines) in the name would, if the user
+        # copy-pastes the suggestion, execute attacker code under their
+        # local shell. Filter to the safe charset before printing a command;
+        # for non-matching names, print a quoted label only, no command.
+        SAFE_REPO_NAME_RE='^[A-Za-z0-9._-]+$'
         for ws_root in "${WS_ROOTS[@]}"; do
             for DIR in "${ws_root}"/*/; do
                 [ ! -d "$DIR" ] && continue
@@ -804,12 +814,24 @@ for repo in data:
                     ORPHAN_FOUND=1
                 fi
 
-                if [ -d "$DIR/.git" ]; then
-                    echo -e "${YELLOW}  - ${DIR_NAME}/ （在 ${ws_root}，是 git 仓库，但 GitHub 仓库缺少 ${TOPIC} topic）${NC}"
-                    echo -e "${YELLOW}    → gh repo edit ${GITHUB_USER}/${DIR_NAME} --add-topic ${TOPIC}${NC}"
+                # printf %q-quote the directory name into the human-visible
+                # label to neutralize ANSI/CR/LF; echo without -e to also
+                # block backslash-escape interpretation.
+                DIR_LABEL=$(printf '%q' "$DIR_NAME")
+                if [[ "$DIR_NAME" =~ $SAFE_REPO_NAME_RE ]]; then
+                    if [ -d "$DIR/.git" ]; then
+                        echo "  - ${DIR_LABEL}/ （在 ${ws_root}，是 git 仓库，但 GitHub 仓库缺少 ${TOPIC} topic）"
+                        echo "    → gh repo edit ${GITHUB_USER}/${DIR_NAME} --add-topic ${TOPIC}"
+                    else
+                        echo "  - ${DIR_LABEL}/ （在 ${ws_root}，不是 git 仓库）"
+                        echo "    → 需要 git init + 创建 GitHub 仓库 + 添加 ${TOPIC} topic"
+                    fi
                 else
-                    echo -e "${YELLOW}  - ${DIR_NAME}/ （在 ${ws_root}，不是 git 仓库）${NC}"
-                    echo -e "${YELLOW}    → 需要 git init + 创建 GitHub 仓库 + 添加 ${TOPIC} topic${NC}"
+                    if [ -d "$DIR/.git" ]; then
+                        echo "  - ${DIR_LABEL}/ （在 ${ws_root}，是 git 仓库，但目录名含特殊字符——不输出建议命令，请手动核对）"
+                    else
+                        echo "  - ${DIR_LABEL}/ （在 ${ws_root}，不是 git 仓库，且目录名含特殊字符——请手动核对）"
+                    fi
                 fi
             done
         done
