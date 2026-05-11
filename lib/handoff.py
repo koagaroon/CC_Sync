@@ -174,11 +174,64 @@ def write_registry(text, devices):
 
 
 def _get_device_names(text):
-    """Return device names: from registry if present, else from ## headers."""
+    """Return device names: from registry if present, else from ## headers.
+
+    For *boundary* detection in extract/remove operations, prefer
+    `_get_boundary_headers(text)` instead — see that function's docstring for
+    why registry-only is unsafe as a boundary set."""
     registry = read_registry(text)
     if registry is not None:
         return registry
     return _extract_all_headers(text)
+
+
+def _get_boundary_headers(text):
+    """Return the set of `## <Name>` strings that count as section boundaries
+    for extract/remove operations.
+
+    Boundaries = registered names ∪ observed top-level headers.
+
+    Why union, not registry-only: a stale or tampered registry that omits a
+    real on-disk `## RealDevice` section would, if treated as the sole
+    boundary source, cause `extract_section_body` to read PAST that section
+    and merge its content into the previous section's body. The previous
+    section's body is injected into Claude's preflight banner, so a leaked
+    `## RealDevice` body becomes a prompt-injection vector. `remove_section`
+    has the symmetric data-loss case: removing one section can delete through
+    an omitted real section to the next registered boundary.
+
+    Why union, not on-disk-only: an unregistered top-level heading inside a
+    task body (e.g. user types `## Notes` as a heading inside a bullet list)
+    would be a false boundary and would truncate the section body.
+
+    The union catches both: both signals contribute boundaries, so neither a
+    registry omission nor a body heading can hide adjacent content. When the
+    two signals disagree, we WARN to stderr — the AI / user sees the mismatch
+    and can fix the file. Truncation (body heading false-positive) is
+    recoverable: the user notices missing tasks and either removes the heading
+    or registers it. Leakage into a Claude session is not — by the time the
+    injection runs the trust boundary is already crossed.
+    """
+    registry = read_registry(text)
+    on_disk = _extract_all_headers(text)
+    on_disk_set = set(on_disk)
+    if registry is None:
+        return {f"## {n}" for n in on_disk}
+    registry_set = set(registry)
+    if registry_set != on_disk_set:
+        on_disk_only = sorted(on_disk_set - registry_set)
+        registry_only = sorted(registry_set - on_disk_set)
+        msg_parts = []
+        if on_disk_only:
+            msg_parts.append(f"on-disk-only={on_disk_only}")
+        if registry_only:
+            msg_parts.append(f"registry-only={registry_only}")
+        print(
+            "warning: HANDOFF.md registry / top-level headers mismatch — "
+            f"{'; '.join(msg_parts)}. Using union as boundaries (truncation > leakage).",
+            file=sys.stderr,
+        )
+    return {f"## {n}" for n in registry_set | on_disk_set}
 
 
 def section_exists(text, name):
@@ -197,25 +250,23 @@ def section_exists(text, name):
 
 
 def extract_section_body(text, name):
-    """Extract the body content of a named section, fence-aware and registry-bounded.
+    """Extract the body content of a named section, fence-aware and union-bounded.
 
     Walks lines through `_iter_top_level_lines` (skips fenced code blocks) instead
     of running a `MULTILINE` regex against the raw text — otherwise a `## DeviceName`
     line buried in a task body's code fence would prematurely terminate the body
-    extraction. Section boundaries are limited to **registered device names**
-    (registry comment, plus implicit ANY; or all top-level validated headers in
-    legacy/no-registry mode): a task body containing an unregistered heading like
-    `## Notes` or `## Safety` does NOT end the section. Without this constraint,
-    a collaborator who can edit HANDOFF.md can hide tasks from the receiver by
-    inserting an unregistered `## ` line — everything after it would be silently
-    dropped from `get_pending_tasks` and the preflight banner. Returns None if no
-    top-level header matches `name`.
+    extraction. Section boundaries come from `_get_boundary_headers` — the union
+    of registered names and observed on-disk headers, which catches both
+    body-heading false boundaries (`## Notes` inside a body, when registered) and
+    registry-omitted real sections (which would otherwise leak into the previous
+    body and inject into Claude's preflight banner). Returns None if no top-level
+    header matches `name`.
     """
     lines = text.split("\n")
     target_header = f"## {name}"
     target_index = None
     next_boundary = None
-    boundary_headers = {f"## {n}" for n in _get_device_names(text)}
+    boundary_headers = _get_boundary_headers(text)
     for i, line in _iter_top_level_lines(lines):
         stripped = line.rstrip()
         if target_index is None:
@@ -306,14 +357,15 @@ def remove_section(text, name):
 
     Uses line-by-line scanning + code-fence tracking to avoid matching a literal
     ## Name line that appears inside a code fenced block (which would corrupt
-    unrelated content). Section boundaries are limited to **registered device
-    names** (matching `extract_section_body`'s rule); without this, an unregistered
-    `## ` heading inside the target's body would shorten the deletion span and
-    leave orphaned task content stranded after the removal.
+    unrelated content). Section boundaries come from `_get_boundary_headers` —
+    the union of registered names and observed on-disk headers. The union
+    bounds the deletion span at the next real or registered header, so
+    removing one section can never delete through a registry-omitted real
+    section to the next registered boundary.
     """
     lines = text.split("\n")
-    boundary_headers = {f"## {n}" for n in _get_device_names(text)}
-    # Collect device-section-header indices (non-fenced, registered-name `## <Name>` lines)
+    boundary_headers = _get_boundary_headers(text)
+    # Collect device-section-header indices (non-fenced, in boundary set)
     boundary_indices = []
     target_index = None
     target_header = f"## {name}"
