@@ -791,6 +791,13 @@ for repo in data:
     # 孤儿目录检测：有远端仓库列表时才做（没有的话没对比基准）
     if [ -n "$REPOS" ]; then
         ORPHAN_FOUND=0
+        # Treat .sync_ignore entries as known so the orphan loop doesn't
+        # re-flag intentionally-excluded repos. Without this, .sync_ignore
+        # only filters topic discovery — the orphan check below would still
+        # warn on every sync.
+        while IFS= read -r ignored_name; do
+            [ -n "$ignored_name" ] && KNOWN_REPOS["$ignored_name"]=1
+        done <<< "$IGNORED_LIST"
         # GitHub repo names are constrained to [A-Za-z0-9._-]. Local dirs that
         # don't match that regex CAN'T have a corresponding GitHub repo via
         # the suggested command — and worse, embedding such names unquoted in
