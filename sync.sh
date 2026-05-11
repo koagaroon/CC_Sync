@@ -15,6 +15,38 @@ else
     INTERACTIVE=false
 fi
 
+# --- CLI flags ---
+# --show-diff: 让 CONFLICT 块包含 DIFF 正文（默认仅元数据）。审计点出问题：
+# 非交互模式下 sync.sh 的输出会进入 Claude 会话 transcript 和日志；如果配置文件
+# 含密钥/token，diff 也会把那几行带进去。默认只输出文件大小、行数和时间戳，
+# 用户在 AskUserQuestion 阶段如需看具体改动，AI 可重跑 sync.sh --show-diff。
+SHOW_DIFF=false
+_REMAINING_ARGS=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --show-diff) SHOW_DIFF=true ;;
+        *) _REMAINING_ARGS+=("$_arg") ;;
+    esac
+done
+set -- "${_REMAINING_ARGS[@]}"
+unset _arg _REMAINING_ARGS
+
+# 哪些 dotfiles → ~/.claude 复制需要用户确认（即使本地一开始没有这个文件）：
+# 攻击者若拿到 dotfiles GitHub auth，能把 settings.json 的 hooks 字段改成
+# 恶意命令，下一次新设备首次 sync 会把这套 hooks 直接落到 ~/.claude/。这些
+# 文件直接影响 Claude 的行为，repo→local 一侧导入也走 confirm 流程更稳。
+# basename 匹配；本机→远端方向不受此 list 约束（本地内容默认可信）。
+SENSITIVE_REPO_TO_LOCAL_BASENAMES=("settings.json" "keybindings.json" "statusline.sh" "CLAUDE.md")
+_is_sensitive_basename() {
+    local _bn
+    _bn=$(basename "$1")
+    local _s
+    for _s in "${SENSITIVE_REPO_TO_LOCAL_BASENAMES[@]}"; do
+        [ "$_bn" = "$_s" ] && return 0
+    done
+    return 1
+}
+
 # --- 首次配置向导 ---
 run_first_run_wizard() {
     detect_gh || true  # best-effort: 向导内可能需要 $GH 执行 gh repo create
@@ -891,6 +923,45 @@ sync_config_file() {
         return
     fi
     if [ -f "$REPO_FILE" ] && [ ! -f "$LOCAL_FILE" ]; then
+        # 敏感文件（settings.json / keybindings.json / statusline.sh / CLAUDE.md）
+        # 的 repo→local 一侧导入需要用户显式同意：被篡改的 dotfiles 可借此把
+        # 恶意 hooks/keybinding/statusline 落到新设备 ~/.claude/。其它配置文件
+        # 维持自动复制不变以保证新机首次 sync 体验。
+        if _is_sensitive_basename "$LOCAL_FILE"; then
+            local REPO_LINES REPO_TIME
+            REPO_LINES=$(wc -l < "$REPO_FILE" 2>/dev/null | tr -d ' ' || echo "?")
+            REPO_TIME=$(date -r "$REPO_FILE" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "unknown")
+            if [ "$INTERACTIVE" = true ]; then
+                echo -e "  ${YELLOW}!${NC} $LABEL: 本地不存在，dotfiles 中有该文件（${REPO_LINES} 行，${REPO_TIME}）"
+                echo "    本文件控制 Claude 行为，新设备首次导入也需要你确认。"
+                read -p "    导入到 ${LOCAL_FILE}？(y/N): " _IMP
+                case "$_IMP" in
+                    y|Y)
+                        if _sync_one_way "$REPO_FILE" "$LOCAL_FILE" "$LABEL: 已导入" "${GREEN}←${NC}"; then
+                            CFG_SYNCED=$((CFG_SYNCED+1))
+                        else
+                            CFG_FAIL=$((CFG_FAIL+1)); HAS_ERROR=1
+                        fi
+                        ;;
+                    *)
+                        echo "    已跳过，本地保持空缺。"
+                        CFG_CONFLICT=$((CFG_CONFLICT+1))
+                        ;;
+                esac
+            else
+                # 非交互：emit IMPORT 块，由 SKILL.md 调 AskUserQuestion 决策
+                echo "===IMPORT_BEGIN==="
+                echo "LABEL: $LABEL"
+                echo "REPO: $REPO_FILE"
+                echo "LOCAL: $LOCAL_FILE"
+                echo "REPO_TIME: $REPO_TIME"
+                echo "REPO_LINES: $REPO_LINES"
+                echo "REASON: sensitive (controls Claude behavior — confirm before importing)"
+                echo "===IMPORT_END==="
+                CFG_CONFLICT=$((CFG_CONFLICT+1))
+            fi
+            return
+        fi
         if _sync_one_way "$REPO_FILE" "$LOCAL_FILE" "$LABEL: 仓库新增，同步到本地" "${GREEN}←${NC}"; then
             CFG_SYNCED=$((CFG_SYNCED+1))
         else
@@ -934,17 +1005,31 @@ sync_config_file() {
         # Non-interactive mode (Claude Code): structured conflict block
         # Format consumed by SKILL.md → AskUserQuestion flow
         # Do not change field names or delimiters without updating SKILL.md
-        # DIFF payload includes a direction hint as its first content line so the
-        # AskUserQuestion preview is self-explanatory about which side is which
+        # DIFF payload is suppressed by default — the audit flagged that the
+        # full diff goes into Claude's conversation transcript and any logs
+        # the CLI captures, which would expose any token/password that happened
+        # to appear in or near the diffed lines. Default emits only metadata
+        # (line counts, timestamps). When the user explicitly asks to see the
+        # diff, AI re-runs `bash sync.sh --show-diff` to populate the DIFF
+        # section for that session.
+        local REPO_LINES LOCAL_LINES
+        REPO_LINES=$(wc -l < "$REPO_FILE" 2>/dev/null | tr -d ' ' || echo "?")
+        LOCAL_LINES=$(wc -l < "$LOCAL_FILE" 2>/dev/null | tr -d ' ' || echo "?")
         echo "===CONFLICT_BEGIN==="
         echo "LABEL: $LABEL"
         echo "REPO: $REPO_FILE"
         echo "LOCAL: $LOCAL_FILE"
         echo "REPO_TIME: $REPO_TIME"
         echo "LOCAL_TIME: $LOCAL_TIME"
-        echo "DIFF:"
-        echo "        (lines starting with '-' show the REPO version; lines with '+' show the LOCAL version)"
-        echo "$DIFF_OUTPUT" | sed 's/^/        /'
+        echo "REPO_LINES: $REPO_LINES"
+        echo "LOCAL_LINES: $LOCAL_LINES"
+        if [ "$SHOW_DIFF" = true ]; then
+            echo "DIFF:"
+            echo "        (lines starting with '-' show the REPO version; lines with '+' show the LOCAL version)"
+            echo "$DIFF_OUTPUT" | sed 's/^/        /'
+        else
+            echo "DIFF_SUPPRESSED: true  # re-run with --show-diff to populate DIFF section"
+        fi
         echo "===CONFLICT_END==="
         CHOICE="s"  # Default skip; AI resolves via AskUserQuestion
     fi

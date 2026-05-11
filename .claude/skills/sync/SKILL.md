@@ -81,27 +81,48 @@ REPO: <dotfiles-path>/claude/settings.json
 LOCAL: ~/.claude/settings.json
 REPO_TIME: 2025-04-07 14:32
 LOCAL_TIME: 2025-04-08 09:15
-DIFF:
-        (lines starting with '-' show the REPO version; lines with '+' show the LOCAL version)
-        --- <dotfiles-path>/claude/settings.json
-        +++ ~/.claude/settings.json
-        @@ -3,2 +3,2 @@
-        -  "theme": "dark"
-        +  "theme": "light"
+REPO_LINES: 47
+LOCAL_LINES: 52
+DIFF_SUPPRESSED: true  # re-run with --show-diff to populate DIFF section
 ===CONFLICT_END===
 ```
 
-Parse each field from the block, then call AskUserQuestion:
+By default, the DIFF section is **suppressed** to keep file contents out of Claude's conversation transcript and any logs. If a config file contains an API token, password, or other secret near the changed lines, an unsuppressed diff would expose those characters to the transcript. The block carries only metadata (file paths, timestamps, line counts) by default.
+
+Parse each field from the block, then call AskUserQuestion. Use line counts + timestamps in the option descriptions, and include a 4th option that lets the user request the full diff:
 
 ```json
-{"questions": [{"header": "settings", "question": "Config file settings.json has a conflict. Which version to keep?", "multiSelect": false, "options": [{"label": "Repo version", "description": "Use dotfiles repo copy (REPO_TIME from block)", "preview": "(DIFF lines from block, strip 8-space indent)"}, {"label": "Local version", "description": "Use local machine copy (LOCAL_TIME from block)", "preview": "(same DIFF content)"}, {"label": "Ask again next sync", "description": "Leave both versions as-is for now; this conflict will reappear on the next /sync so the decision can wait"}]}]}
+{"questions": [{"header": "settings", "question": "Config file settings.json has a conflict. Which version to keep?", "multiSelect": false, "options": [{"label": "Repo version", "description": "Use dotfiles repo copy (REPO_LINES lines, REPO_TIME)"}, {"label": "Local version", "description": "Use local machine copy (LOCAL_LINES lines, LOCAL_TIME)"}, {"label": "Show full diff", "description": "Re-run sync.sh --show-diff to see the actual changed lines, then re-ask"}, {"label": "Ask again next sync", "description": "Leave both versions as-is for now; this conflict will reappear on the next /sync"}]}]}
 ```
 
 Field mapping:
 - `LABEL` → `question` text and `header` (trim whitespace, strip extension, truncate to 12 chars if needed)
 - `REPO_TIME` / `LOCAL_TIME` → option `description` timestamps
-- `DIFF` lines (strip exact 8-space indent) → option `preview` content. The first line of DIFF is an intentional direction-hint ("lines starting with '-' show the REPO version...") — pass it through verbatim so the reader doesn't need to decode `-`/`+`.
+- `REPO_LINES` / `LOCAL_LINES` → option `description` line counts
 - `REPO` / `LOCAL` → used in post-resolution `cp` commands (see Workflow § CONFLICT)
+
+**Handling "Show full diff":** when the user picks this option, re-run `bash sync.sh --show-diff` to get a new CONFLICT block that contains the actual `DIFF:` content. That block has the same field names but with a populated DIFF section (8-space indented lines, first line is the direction hint). Parse it and re-present the AskUserQuestion with the diff in option `preview` fields. The re-run is bounded to this session — the next routine sync still defaults to suppressed.
+
+#### IMPORT example call (sensitive file, repo→local first import)
+
+When output contains an IMPORT block, the dotfiles repo has a sensitive config file (settings.json / keybindings.json / statusline.sh / CLAUDE.md) that the local machine does NOT have yet. The script refuses to auto-import these because they control Claude's behavior — a tampered dotfiles repo could land malicious hooks or keybindings on a new device's first sync. AskUserQuestion to confirm:
+
+```
+===IMPORT_BEGIN===
+LABEL: settings.json
+REPO: <dotfiles-path>/claude/settings.json
+LOCAL: ~/.claude/settings.json
+REPO_TIME: 2025-04-07 14:32
+REPO_LINES: 47
+REASON: sensitive (controls Claude behavior — confirm before importing)
+===IMPORT_END===
+```
+
+```json
+{"questions": [{"header": "settings", "question": "Import settings.json from dotfiles to ~/.claude/? (controls Claude behavior on this machine)", "multiSelect": false, "options": [{"label": "Import", "description": "Copy REPO_LINES lines from REPO_TIME into ~/.claude/"}, {"label": "Show full content", "description": "Re-run sync.sh --show-diff to see the actual file contents, then re-ask"}, {"label": "Skip — keep local missing", "description": "Don't import; the file stays absent locally and this prompt reappears on next /sync"}]}]}
+```
+
+After "Import" → `cp -- '<REPO>' '<LOCAL>'` (single-quote per Critical Rules § Filenames). After "Show full content" → re-run `bash sync.sh --show-diff` and re-present (the script doesn't currently emit content for IMPORT blocks; treat this as "show file content via `cat -- '<REPO>'`" if user really wants it).
 
 #### NEW_REPO example call
 
@@ -213,6 +234,7 @@ Handles: discover repos → sync dotfiles config → pull → commit (fixed mess
 - Display everything after the `[4/6]` summary marker verbatim — do not reformat, wrap in code blocks, or build a new table
 - If output contains the line `检测到未安装的插件：` (sync.sh emits this exact Chinese header before listing missing plugins; the install commands appear under a `运行以下命令安装：` header that follows), show the listed plugins and the install commands verbatim, and prompt the user to run them inside Claude Code
 - If output contains **===CONFLICT_BEGIN===** blocks, enter conflict resolution flow (below)
+- If output contains **===IMPORT_BEGIN===** blocks, enter sensitive-import confirmation flow (Critical Rules § IMPORT example)
 - If output contains **===UNTRACKED_BEGIN===** blocks, enter untracked-file resolution flow (below) — these repos are PENDING user input, NOT complete
 - If output contains **NEW_REPO:** markers, enter new repo handling flow (below)
 - If a repo's status line is **`gitignore 条目已落盘待手动提交（.gitignore 预先有未提交修改）`** (in 待决定 group) or **`主提交已推送，gitignore 条目已落盘待手动提交`** (in 已同步 group), the `.gitignore` append landed on disk but was NOT committed (`.gitignore` had pre-existing uncommitted edits). Tell the user to manually commit + push for that repo: `cd <repo-path> && git add .gitignore && git commit -m "sync: auto-append .gitignore (manual)" && git push`. Do NOT treat /sync as complete on this signal alone — the gitignore state lives on disk locally and won't propagate to other devices until committed.
