@@ -4,7 +4,19 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![GitHub release](https://img.shields.io/github/v/release/koagaroon/CC_Sync)](https://github.com/koagaroon/CC_Sync/releases) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 
-Claude Code 多仓库同步、跨设备任务传递、模块管理工具。
+**让多台电脑上的 Claude Code 项目、配置和待办任务保持同步。** CC_Sync 结合 Bash 脚本、Python 辅助程序和 Claude Code 技能，统一处理 Git 仓库同步、跨设备任务传递，以及按已批准版本安装第三方技能。
+
+[快速开始](#快速开始) · [日常使用](#日常使用在-claude-code-中) · [命令行参考](#命令行参考高级用户) · [项目结构](#项目结构) · [许可证](#许可证)
+
+## 工作方式
+
+| 同步对象 | 存放位置 | CC_Sync 的作用 |
+| --- | --- | --- |
+| 项目代码 | 你选择的 GitHub 仓库 | 按 topic 发现仓库，然后拉取、提交已跟踪文件的改动并推送 |
+| Claude Code 配置 | 单独的**私有 dotfiles 仓库** | 同步设置和技能、记录文件状态，并提示冲突或删除 |
+| 设备名称和待办任务 | **你自己的私有 CC_Sync 工作仓库**中的 `HANDOFF.md` | 记录发给其他设备的任务，由 `/sync` 技能询问如何处理 |
+
+本公开仓库用于分发工具。注册设备和传递任务时，请使用下方步骤创建的私有工作副本。Bash 和 Python 负责文件与 Git 操作，Claude Code 技能负责引导冲突处理、配置导入和任务决策。
 
 ## 功能特性
 
@@ -16,28 +28,38 @@ Claude Code 多仓库同步、跨设备任务传递、模块管理工具。
 - **多 workspace 路径支持**——仓库分散在不同目录也能统一管理
 - **删除防复活**——本机账本记录每个配置文件的同步历史，在一台设备上删除的配置不会被其他设备悄悄推回来
 - **模块按版本锁定**——模块更新走“检查 → 批准 → 安装”流程，升级前先看变更，不会自动跟随上游最新代码
-- **确认优先的安全模型**——敏感配置导入、跨设备任务执行、新技能目录同步都先征求你的同意，不做静默动作
+- **引导式决策**——技能会询问敏感配置导入、跨设备任务和新技能的处理方式；常规完整同步会自动提交并推送已跟踪的项目改动
 
 ## 前提条件
 
-### 1. Git
+### 1. Git 和 Bash 4+
+
+脚本需要 **Bash 4 或更高版本**。Windows 用户请使用 Git for Windows 附带的 **Git Bash**。macOS 用户请通过 Homebrew 安装较新的 Bash，并确认 `bash --version` 调用的是该版本。
 
 - **Windows**：打开 **PowerShell**，运行：
   ```powershell
   winget install --id Git.Git -e
   ```
-- **macOS**：打开终端（**Terminal**），运行：`brew install git`
-- **Linux**：打开终端（**Terminal**），运行：`sudo apt install git`
+- **macOS**：打开终端（**Terminal**），运行：`brew install git bash`
+- **Linux（Debian/Ubuntu）**：打开终端（**Terminal**），运行：`sudo apt install git bash`
 
-### 2. Python 3.10+
+### 2. Python 3.11+
+
+Python 辅助程序使用标准库中的 [`tomllib`](https://docs.python.org/3/library/tomllib.html)，因此需要 Python 3.11 或更高版本。脚本直接调用 **`python`**，请确保这个命令在运行 CC_Sync 的 Bash 环境中可用。
 
 - **Windows**：继续在 **PowerShell** 中运行：
   ```powershell
   winget install --id Python.Python.3.13 -e
   ```
-  安装后重新打开 PowerShell，输入 `python --version` 确认版本号 >= 3.10
-- **macOS**：继续在 **Terminal** 中运行：`brew install python`
-- **Linux**：继续在 **Terminal** 中运行：`sudo apt install python3`
+  安装后重新打开终端，在 **Git Bash** 中输入 `python --version`，确认版本号 >= 3.11。
+- **macOS**：继续在 **Terminal** 中运行 `brew install python`，然后让当前终端会话使用 Homebrew 的 Bash 和[无版本号 Python 命令](https://docs.brew.sh/Homebrew-and-Python)：
+  ```bash
+  export PATH="$(brew --prefix)/bin:$(brew --prefix python)/libexec/bin:$PATH"
+  ```
+  新终端会话中需重新执行；如果希望长期生效，可以加入自己的 shell 启动配置。
+- **Linux（Debian/Ubuntu）**：继续在 **Terminal** 中运行：`sudo apt install python3 python-is-python3`，并确认发行版提供的是 Python 3.11 或更高版本。
+
+继续之前，请在准备用来运行 CC_Sync 的同一个终端中执行 `bash --version` 和 `python --version`。当前脚本仅有 `python3` 命令可用还不够。
 
 ### 3. GitHub CLI (gh)
 
@@ -62,39 +84,50 @@ gh auth login
 
 ## 快速开始
 
-### 第 1 步：克隆本仓库
+### 第 1 步：创建自己的私有工作仓库
 
-打开终端（Windows 用 **PowerShell** 或 **Git Bash**，macOS/Linux 用 **Terminal**），运行：
+选择一个存放项目的父文件夹，在其中打开终端（Windows 用 **Git Bash**，macOS/Linux 用已配置 Bash 4+ 的 **Terminal**）。以下命令会下载公开源代码、**在你的 GitHub 账户中创建新的私有仓库**，并推送初始副本。如果已有名为 `cc-sync-workspace` 的仓库，请改用其他名称。
 
 ```bash
-git clone https://github.com/koagaroon/CC_Sync.git
+git clone https://github.com/koagaroon/CC_Sync.git cc-sync-workspace
+cd cc-sync-workspace
+git remote rename origin upstream
+gh repo create cc-sync-workspace --private --source . --remote origin
+git push --set-upstream origin main
 ```
+
+此时 `origin` 指向你的私有仓库，`upstream` 保留为公开源仓库。注册设备和处理任务会在此工作副本中提交并推送 `HANDOFF.md`，因此应使用你拥有写入权限的私有仓库。它与第 3 步配置的私有 dotfiles 仓库是两个独立仓库。
+
+本地文件夹名必须与 GitHub 仓库名一致，因为发现逻辑会查找 `<workspace-root>/<repo-name>`。如果选用其他名称，请在所有步骤中统一替换。
 
 ### 第 2 步：给你的 GitHub 仓库添加标签
 
-继续在同一个终端中，对每个想同步的仓库运行：
+给**刚创建的私有 `cc-sync-workspace` 仓库**以及每个需要同步的项目仓库添加标签。请先替换命令中的占位符：
 
 ```bash
-gh repo edit <你的用户名>/<仓库名> --add-topic claude-code-workspace
+gh repo edit "<your-username>/cc-sync-workspace" --add-topic claude-code-workspace
+gh repo edit "<your-username>/<project-repo>" --add-topic claude-code-workspace
 ```
 
 > 不知道用户名？继续在同一个终端中运行 `gh api user -q .login` 查看。
 
-### 第 3 步：首次配置
+### 第 3 步：准备私有 dotfiles 仓库
+
+同步要求 dotfiles 仓库已有初始提交，且本地分支已关联远程分支。首次设置时，以下命令会创建另一个私有仓库，包含初始 README，并将它克隆到工作副本旁。如果已有名为 `cc-dotfiles` 的仓库，请改用其他名称：
+
+```bash
+cd ..
+gh repo create cc-dotfiles --private --add-readme --clone
+cd cc-sync-workspace
+```
+
+如果已有私有 dotfiles 仓库，请改为将它克隆到单独的文件夹。本地克隆的文件夹名应与 GitHub 仓库名一致。
+
+### 第 4 步：首次配置
 
 > ⚠️ **这一步必须在交互式终端中运行**（不是在 Claude Code 里）。Windows 用户请打开 **Git Bash**，macOS/Linux 用户用 **Terminal**。
 
-在终端中进入你克隆下来的 CC_Sync 目录并运行（路径根据你实际情况修改）：
-
-```bash
-# Windows 示例（请替换为你的实际路径）
-cd /c/Projects/CC_Sync
-
-# macOS/Linux 示例
-cd ~/Projects/CC_Sync
-```
-
-然后运行：
+留在第 1 步的 `cc-sync-workspace` 目录中。**向导结束后会立即执行完整同步：**同步配置，并在启用仓库同步时拉取选中的仓库、提交已跟踪文件的改动并推送。请在确定要发布这些改动时使用；如果只想查看状态，请在相应仓库中运行 `git status`。
 
 ```bash
 bash sync.sh
@@ -104,44 +137,40 @@ bash sync.sh
 
 **问题 1：dotfiles 仓库路径**
 
-输入你想用来存放 Claude Code 配置文件的 git 仓库路径。如果还没有，填一个新路径——脚本会自动创建目录并初始化 git 仓库，还可以帮你在 GitHub 上创建同名的私有仓库。
+填写第 3 步准备好的私有 dotfiles 克隆的完整本地路径。使用现有克隆，可确保首次拉取时已有对应的远程分支。
 
-示例：
-- Windows: `C:/dotfiles` 或 `D:/config/dotfiles`
-- macOS/Linux: `~/dotfiles`
-
-> Windows 路径不区分大小写（`C:/Dotfiles` 和 `c:/dotfiles` 等效）。
-
-> ⚠️ dotfiles 仓库必须保持**私有**。每次同步前都会检查它在 GitHub 上的可见性，公开（PUBLIC）状态会直接中止同步，防止个人配置泄露。
+> dotfiles 仓库应保持**私有**。如果 GitHub 返回公开状态，CC_Sync 会中止同步；如果可见性查询失败，脚本会警告后继续，因此请在同步个人配置前自行确认仓库的可见性。
 
 **问题 2：是否启用仓库同步？**
 
 输入 `y` 启用。启用后会继续询问：
 
-- **仓库存放路径**：输入你平时存代码的目录，多个用 `;` 分隔（如 `D:/Projects;E:/Work`）
+- **仓库存放路径**：填写各个仓库所在的父文件夹，包含第 1 步的 `cc-sync-workspace` 工作副本所在目录；多个路径用 `;` 分隔。
 - **GitHub topic 标签**：直接按回车使用默认值 `claude-code-workspace`
 
 配置完成后，脚本会立即执行一次完整同步。
 
+要在设备间传递任务，请保持仓库同步开启，并确保私有工作仓库具有配置中的 topic、位于配置的工作区目录内。这样才能先拉取它的 `HANDOFF.md` 更新，再检测待办任务。
+
 ## 日常使用（在 Claude Code 中）
 
-配置完成后，以后的所有操作都在 **Claude Code** 中完成。
+配置完成后，可在 **Claude Code** 中使用附带技能进行引导式操作，也可以按[命令行参考](#命令行参考高级用户)直接运行命令。
 
 ### 启动方式
 
 1. 打开 Claude Code
-2. 进入 CC_Sync 目录（如果 CC 不在这个目录，用 `cd` 切换）
+2. 进入自己的私有 `cc-sync-workspace` 目录（需要时用 `cd` 切换）
 
 ### 同步仓库
 
 直接对 Claude 说：
 
 - “同步”
-- “推一下”
-- “pull 所有仓库”
-- “检查一下各个项目的状态”
+- “同步已配置的仓库和 Claude 配置”
 
 或者输入：`/sync`
+
+这些请求会执行**完整同步**，包括提交并推送已跟踪的项目改动。「查看仓库状态」或「只拉取」属于单独的操作，不应调用 `/sync`。
 
 Claude 会自动执行同步脚本，然后：
 
@@ -155,7 +184,7 @@ Claude 会自动执行同步脚本，然后：
 - 如果有跨设备任务（HANDOFF），会逐条向你确认后再处理（见下文）
 - 如果某个仓库 pull 冲突，会分析差异并建议解决方案
 
-你只需要在 Claude 提问时做决定，其余全自动。
+请检查同步汇总，并对技能提出的选项作出决定。
 
 ### 设备管理
 
@@ -204,7 +233,7 @@ HANDOFF 是 CC_Sync 的跨设备任务传递机制。当你在 A 设备上需要
 3. 逐条问你怎么处理：直接执行 / 本次跳过 / 不执行但标记完成 / 拒绝并隔离（内容可疑时）
 4. 处理完毕后清除任务并推送
 
-> 任务内容来自 git 同步过来的文本，被视为不可信输入——Claude 不会不经你确认就执行任务里的任何命令。如果检测到藏在文件里的隐藏任务，会先显示安全警告。
+> 任务内容来自 Git 同步的文本。`/sync` 技能要求 Claude 将其视为不可信输入、报告可疑的隐藏任务，并在执行任务指令前询问你的决定。请在提示时检查任务内容和拟执行的操作。
 
 不需要手动编辑任何文件，全部通过自然语言完成。
 
@@ -214,7 +243,7 @@ HANDOFF 是 CC_Sync 的跨设备任务传递机制。当你在 A 设备上需要
 
 | 命令 | 说明 |
 |------|------|
-| `bash sync.sh` | 完整同步 |
+| `bash sync.sh` | 完整配置与仓库同步，包括提交并推送已跟踪的项目改动 |
 | `bash sync.sh --show-diff` | 完整同步（冲突提示附带完整 diff，默认只有元信息） |
 | `bash sync.sh device list` | 查看设备 |
 | `bash sync.sh device add <名称>` | 注册设备 |
@@ -255,7 +284,7 @@ HANDOFF 是 CC_Sync 的跨设备任务传递机制。当你在 A 设备上需要
 |------|------|
 | `.machine-name` | 本机的设备名（HANDOFF 用） |
 | `.sync_state.json` | 同步状态账本——记录每个配置文件最后同步时的指纹，用于识别被删除过的文件、防止“复活” |
-| `.sync_ignore` | 永久忽略的仓库列表（按需生成；维护自己 fork 的用户可以提交它，在多台设备间共享） |
+| `.sync_ignore` | 永久忽略的仓库列表（按需生成；可提交到私有工作仓库，在多台设备间共享） |
 | `.skill_import_ignore` | 拒绝导入过的技能目录，之后不再询问 |
 | `.repo_sync_hint_count` | 内部提示计数器 |
 
@@ -264,7 +293,7 @@ HANDOFF 是 CC_Sync 的跨设备任务传递机制。当你在 A 设备上需要
 ## 项目结构
 
 ```
-CC_Sync/
+cc-sync-workspace/
 ├── sync.sh                  # 主脚本
 ├── module-manager.sh        # 模块管理
 ├── lib/
@@ -291,15 +320,15 @@ CC_Sync/
 
 ### gh CLI 连接超时
 
-gh CLI 不走系统代理。在受限网络环境下，需要在终端（**Git Bash** 或 **Terminal**）中手动设置：
+先检查网络连接和 `gh auth status`。如果网络需要代理，而 `gh` 未使用它，可在当前 **Git Bash** 或 **Terminal** 会话中设置代理地址；请将占位符替换为实际代理 URL：
 
 ```bash
-export HTTPS_PROXY=http://127.0.0.1:<端口号>
+export HTTPS_PROXY="<your-proxy-url>"
 ```
 
 ### git diff 显示大量改动但内容没变
 
-Windows 上的 CRLF 幻影改动（行尾符差异），不是真正的内容变更。
+Windows 上 CRLF 与 LF 行尾符的变化可能让相同文本显示为已修改。请对比 `git diff` 和 `git diff --ignore-space-at-eol` 的结果，检查仍然存在的差异，再决定是否提交或丢弃改动。
 
 ### 为什么第一次同步会问我要不要导入 settings.json？
 
@@ -311,7 +340,7 @@ CC_Sync 在本机维护一份同步账本（`.sync_state.json`），记录每个
 
 ### dotfiles 仓库可以是公开的吗？
 
-不可以。dotfiles 里存的是你的个人配置，每次同步前都会检查它的 GitHub 可见性，公开（PUBLIC）状态会直接中止同步。
+应保持私有，因为其中存放个人配置。GitHub 返回 dotfiles 仓库为公开状态时会中止同步，但查询失败只会产生警告；出现此警告时，请自行确认可见性。CC_Sync 工作仓库也应保持私有，因为其中会存放设备名称和任务文本。
 
 ### 仓库是用 SSH 克隆的也能同步吗？
 
@@ -319,11 +348,12 @@ CC_Sync 在本机维护一份同步账本（`.sync_state.json`），记录每个
 
 ### 新设备怎么恢复
 
-1. 在终端（**PowerShell** 或 **Git Bash**）中克隆：`git clone https://github.com/koagaroon/CC_Sync.git`
-2. 继续在终端中进入目录并运行（路径替换为你的实际位置）：`cd /c/Projects/CC_Sync && bash sync.sh`（完成向导）
-3. 打开 **Claude Code**，进入 CC_Sync 目录，说“注册新设备 xxx”
-4. 继续在 **Claude Code** 中说“同步”拉取所有配置和代码（首次导入 settings.json 等敏感配置时会逐个向你确认）
-5. 继续在 **Claude Code** 中说“恢复所有模块”（按清单中锁定的版本恢复）
+1. 安装并检查[前提条件](#前提条件)，然后登录拥有私有仓库的 GitHub 账户。
+2. 在 Windows 的 **Git Bash** 或 macOS/Linux 的 **Terminal** 中，将**之前创建的同一个私有工作仓库**克隆到配置的工作区目录内：`gh repo clone "<your-username>/cc-sync-workspace"`。
+3. 用 `gh repo clone "<your-username>/<dotfiles-repo>"` 将**现有的私有 dotfiles 仓库**克隆到单独的文件夹，并在向导中填写这个本地路径。填写新的空路径会启动仓库创建流程，不会克隆已有配置。
+4. 运行 `cd cc-sync-workspace` 进入工作副本，再执行 `bash sync.sh`。填写已克隆的 dotfiles 路径、开启仓库同步，并包含此工作副本所在的父文件夹。向导会接着执行完整同步。
+5. 在 `cc-sync-workspace` 目录打开 **Claude Code**，注册唯一的设备名，之后通过 `/sync` 同步。敏感配置的首次导入和任务处理按技能的确认流程进行。
+6. 继续在 **Claude Code** 中说“恢复所有模块”（按清单中锁定的版本恢复）
 
 ## 作者
 
@@ -332,3 +362,5 @@ VRPSPshinOvO
 ## 许可证
 
 [MIT License](./LICENSE)
+
+CC_Sync 按 MIT 许可证分发。Git、Bash、Python、GitHub CLI 和 Claude Code 需要单独安装，遵循各自的许可证或使用条款。模块管理器安装的第三方技能保留其上游许可证，本项目的 MIT 许可证不会改变这些模块的授权方式。
