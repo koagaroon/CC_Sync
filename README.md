@@ -23,7 +23,7 @@
 - **多仓库批量同步**——通过 GitHub topic 自动发现仓库，一键 pull/commit/push
 - **跨设备配置同步**——settings.json、skills、hooks、keybindings 等通过 dotfiles 仓库同步
 - **跨设备任务传递**——通过 HANDOFF.md 在设备间传递待办任务
-- **第三方模块管理**——从 GitHub 安装/更新/删除/恢复 skills
+- **第三方模块管理**——从 GitHub 安装/更新/删除/恢复技能
 - **首次引导向导**——交互式 .env 配置，小白也能完成
 - **多 workspace 路径支持**——仓库分散在不同目录也能统一管理
 - **删除防复活**——本机账本记录每个配置文件的同步历史，在一台设备上删除的配置不会被其他设备悄悄推回来
@@ -59,7 +59,7 @@ Python 辅助程序使用标准库中的 [`tomllib`](https://docs.python.org/3/l
   新终端会话中需重新执行；如果希望长期生效，可以加入自己的 shell 启动配置。
 - **Linux（Debian/Ubuntu）**：继续在 **Terminal** 中运行：`sudo apt install python3 python-is-python3`，并确认发行版提供的是 Python 3.11 或更高版本。
 
-继续之前，请在准备用来运行 CC_Sync 的同一个终端中执行 `bash --version` 和 `python --version`。当前脚本仅有 `python3` 命令可用还不够。
+继续之前，请在准备用来运行 CC_Sync 的同一个终端中执行 `bash --version` 和 `python --version`。脚本调用的是 `python` 命令；如果系统里只有 `python3` 而没有 `python`，还不能运行。
 
 ### 3. GitHub CLI (gh)
 
@@ -127,7 +127,7 @@ cd cc-sync-workspace
 
 > ⚠️ **这一步必须在交互式终端中运行**（不是在 Claude Code 里）。Windows 用户请打开 **Git Bash**，macOS/Linux 用户用 **Terminal**。
 
-留在第 1 步的 `cc-sync-workspace` 目录中。**向导结束后会立即执行完整同步：**同步配置，并在启用仓库同步时拉取选中的仓库、提交已跟踪文件的改动并推送。请在确定要发布这些改动时使用；如果只想查看状态，请在相应仓库中运行 `git status`。
+留在第 1 步的 `cc-sync-workspace` 目录中。**向导结束后会立即执行完整同步：**同步配置，并在启用仓库同步时拉取选中的仓库、提交已跟踪文件的改动并推送。请在确定要提交并推送这些改动时再运行；如果只想查看状态，请在相应仓库中运行 `git status`。
 
 ```bash
 bash sync.sh
@@ -150,7 +150,7 @@ bash sync.sh
 
 配置完成后，脚本会立即执行一次完整同步。
 
-要在设备间传递任务，请保持仓库同步开启，并确保私有工作仓库具有配置中的 topic、位于配置的工作区目录内。这样才能先拉取它的 `HANDOFF.md` 更新，再检测待办任务。
+要在设备间传递任务，请保持仓库同步开启，并确保私有工作仓库带有配置中指定的 topic 标签，并位于配置的工作区目录内。这样才能先拉取它的 `HANDOFF.md` 更新，再检测待办任务。
 
 ## 日常使用（在 Claude Code 中）
 
@@ -170,7 +170,7 @@ bash sync.sh
 
 或者输入：`/sync`
 
-这些请求会执行**完整同步**，包括提交并推送已跟踪的项目改动。「查看仓库状态」或「只拉取」属于单独的操作，不应调用 `/sync`。
+这些请求会执行**完整同步**，包括提交并推送已跟踪的项目改动。“查看仓库状态”或“只拉取”属于单独的操作，不应调用 `/sync`。
 
 Claude 会自动执行同步脚本，然后：
 
@@ -201,7 +201,7 @@ Claude 会自动执行同步脚本，然后：
 - “查看已安装的模块”
 - “检查更新”
 - “更新所有模块”
-- “安装 anthropics/skills 里的 pdf skill”
+- “安装 anthropics/skills 里的 pdf 技能”
 - “删除 xxx 模块”
 - “纳管 xxx 目录”（把手动放进去的已有目录登记到清单里）
 - “清理未纳管的目录”
@@ -224,7 +224,7 @@ HANDOFF 是 CC_Sync 的跨设备任务传递机制。当你在 A 设备上需要
 
 - “给 OfficePC 留个任务：把 xxx 项目的配置文件复制过来”
 - “给 HomeMac 留个任务：运行 pip install requests”
-- “所有设备都要做：更新 gh CLI”（写入 ANY section，所有设备都会看到）
+- “所有设备都要做：更新 gh CLI”（写入 ANY 区段，所有设备都会看到）
 
 **接收任务：** 在 B 设备的 **Claude Code** 中运行 /sync 时，Claude 会自动：
 
@@ -261,9 +261,9 @@ HANDOFF 是 CC_Sync 的跨设备任务传递机制。当你在 A 设备上需要
 | `bash module-manager.sh prune [--all \| --confirm <名称>...]` | 清理未纳管的目录 |
 | `bash module-manager.sh restore` | 新设备恢复 |
 
-> `module-manager.sh check` 的退出码是信息性的：`0` = 全部最新，`10` = 有可用更新，`1` = 查询出错。写脚本调用时不要把 `10` 当作失败。
+> `module-manager.sh check` 通过退出码区分检查结果：`0` = 全部最新，`10` = 有可用更新，`1` = 查询出错。写脚本调用时不要把 `10` 当作失败。
 >
-> 另有 `sync.sh prune-apply` 和 `sync.sh skill-import` 两个机械执行子命令，由 /sync 技能在你确认后调用，一般不需要手动使用。
+> 另有 `sync.sh prune-apply` 和 `sync.sh skill-import` 两个供 `/sync` 技能调用的底层子命令，会在你确认后执行，一般不需要手动使用。
 >
 > 想验证脚本本身是否完好，可运行 `bash tests/bounce_simulation.sh`——它在隔离的测试模式下执行，不会碰你的真实仓库和配置。
 
@@ -299,7 +299,7 @@ cc-sync-workspace/
 ├── lib/
 │   ├── common.sh            # 共享 bash 工具
 │   ├── handoff.py           # HANDOFF.md 解析/写入
-│   └── module_helper.py     # 模块管理 Python helper
+│   └── module_helper.py     # 模块管理 Python 辅助程序
 ├── tests/
 │   └── bounce_simulation.sh # 自检测试（隔离测试模式，不碰真实仓库）
 ├── HANDOFF.md               # 跨设备任务传递
@@ -336,7 +336,7 @@ Windows 上 CRLF 与 LF 行尾符的变化可能让相同文本显示为已修�
 
 ### 删除过的配置文件为什么会问我怎么处理？
 
-CC_Sync 在本机维护一份同步账本（`.sync_state.json`），记录每个配置文件最后同步时的状态。当发现某个文件在别的设备上被删除、但本机还留有副本时，会问你：删除本机副本（跟随删除）、保留在本机（以后不再询问、也不推回）、还是推回仓库（撤销删除）。这样就不会出现“在 A 设备上删掉的配置被 B 设备又推了回来”。
+CC_Sync 在本机维护一份同步账本（`.sync_state.json`），记录每个配置文件最后同步时的状态。当发现某个文件在别的设备上被删除、但本机还留有副本时，会问你：删除本机副本（跟随删除）、保留在本机（以后不再询问、也不推回）、还是推回仓库（撤销删除）。这样就不会出现“在 A 设备上删掉的配置又被 B 设备推了回来”的情况。
 
 ### dotfiles 仓库可以是公开的吗？
 
